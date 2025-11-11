@@ -19,9 +19,5 @@ release.properties
 # Logs
 *.log
 
-# Ignore specific test file (on request)
-src/test
-.github
-src/main/java/fr/uca/sgbd/BufferManager.java
-src/main/java/fr/uca/sgbd/BufferFrame.java
-.github
+# Ignorer le dossier de tests
+src/test/

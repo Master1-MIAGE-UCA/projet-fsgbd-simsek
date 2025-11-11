@@ -13,9 +13,9 @@ public class App {
         Files.deleteIfExists(p);
 
         try (MiniSGBD db = new MiniSGBD(dbPath)) {
-            // Insertion de 105 enregistrements
+            // Insertion de 105 enregistrements (synchrone)
             for (int i = 1; i <= 105; i++) {
-                db.insertRecord("Etudiant " + i);
+                db.insertRecordSync("Etudiant " + i);
             }
 
             // Lecture d'un enregistrement (id 41 -> affiche "Etudiant 42")

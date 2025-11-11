@@ -1,6 +1,5 @@
 package fr.uca.sgbd;
 
-import java.io.EOFException;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -27,13 +26,15 @@ public class MiniSGBD implements AutoCloseable {
     public static final int RECORDS_PER_PAGE = PAGE_SIZE / RECORD_SIZE; // 40
 
     private final RandomAccessFile raf;
+    private final BufferManager bufferManager;
 
     public MiniSGBD(String path) throws FileNotFoundException {
         this(new File(path));
     }
 
     public MiniSGBD(File file) throws FileNotFoundException {
-    this.raf = new RandomAccessFile(file, "rw");
+        this.raf = new RandomAccessFile(file, "rw");
+        this.bufferManager = new BufferManager(this);
     }
 
     /**
@@ -62,6 +63,57 @@ public class MiniSGBD implements AutoCloseable {
     }
 
     /**
+     * Insère un enregistrement de façon synchrone : écrit dans le buffer et force l'écriture sur disque.
+     */
+    public synchronized void insertRecordSync(String value) throws IOException {
+        byte[] dataUtf8 = value.getBytes(StandardCharsets.UTF_8);
+        byte[] fixed = new byte[RECORD_SIZE];
+        int len = Math.min(dataUtf8.length, RECORD_SIZE);
+        System.arraycopy(dataUtf8, 0, fixed, 0, len);
+        // padding implicite avec 0 pour le reste
+
+        int pageIndex = 0;
+        boolean inserted = false;
+        while (!inserted) {
+            BufferFrame frame = bufferManager.FIX(pageIndex);
+            try {
+                // Cherche la première case vide dans la page
+                int slot = -1;
+                for (int i = 0; i < RECORDS_PER_PAGE; i++) {
+                    boolean empty = true;
+                    for (int j = 0; j < RECORD_SIZE; j++) {
+                        if (frame.data[i * RECORD_SIZE + j] != 0) {
+                            empty = false;
+                            break;
+                        }
+                    }
+                    if (empty) {
+                        slot = i;
+                        break;
+                    }
+                }
+                if (slot != -1) {
+                    // Insère dans la première case vide
+                    System.arraycopy(fixed, 0, frame.data, slot * RECORD_SIZE, RECORD_SIZE);
+                    bufferManager.USE(pageIndex);
+                    bufferManager.FORCE(pageIndex);
+                    // Met à jour la taille du fichier si besoin
+                    long newEnd = (long) pageIndex * PAGE_SIZE + (slot + 1) * RECORD_SIZE;
+                    if (newEnd > raf.length()) {
+                        raf.setLength(newEnd);
+                    }
+                    inserted = true;
+                } else {
+                    // Page pleine, passe à la suivante
+                    pageIndex++;
+                }
+            } finally {
+                bufferManager.UNFIX(pageIndex);
+            }
+        }
+    }
+
+    /**
      * Lit un enregistrement par son index (0-based).
      * Retourne la chaîne décodée sans les octets nuls de fin.
      */
@@ -70,16 +122,15 @@ public class MiniSGBD implements AutoCloseable {
 
         long pageIndex = recordId / RECORDS_PER_PAGE;
         long indexInPage = recordId % RECORDS_PER_PAGE;
-        long pos = pageIndex * PAGE_SIZE + indexInPage * RECORD_SIZE;
-        if (pos + RECORD_SIZE > raf.length()) throw new IndexOutOfBoundsException("recordId hors bornes");
-
-        byte[] buf = new byte[RECORD_SIZE];
-        raf.seek(pos);
-        int read = raf.read(buf);
-        if (read < RECORD_SIZE) throw new EOFException("Enregistrement incomplet lu");
-
-        int effective = trimRightZeros(buf);
-        return new String(buf, 0, effective, StandardCharsets.UTF_8);
+        BufferFrame frame = bufferManager.FIX((int) pageIndex);
+        try {
+            byte[] buf = new byte[RECORD_SIZE];
+            System.arraycopy(frame.data, (int) (indexInPage * RECORD_SIZE), buf, 0, RECORD_SIZE);
+            int effective = trimRightZeros(buf);
+            return new String(buf, 0, effective, StandardCharsets.UTF_8);
+        } finally {
+            bufferManager.UNFIX((int) pageIndex);
+        }
     }
 
     /**
@@ -99,14 +150,16 @@ public class MiniSGBD implements AutoCloseable {
         if (remaining < toReadRecords) toReadRecords = (int) remaining;
 
         List<String> page = new ArrayList<>(toReadRecords);
-        byte[] buf = new byte[RECORD_SIZE];
-        long pos = pageStart;
-        raf.seek(pos);
-        for (int i = 0; i < toReadRecords; i++) {
-            int read = raf.read(buf);
-            if (read < RECORD_SIZE) break; // enregistrement partiel en fin de fichier
-            int effective = trimRightZeros(buf);
-            page.add(new String(buf, 0, effective, StandardCharsets.UTF_8));
+        BufferFrame frame = bufferManager.FIX(pageIndex);
+        try {
+            for (int i = 0; i < toReadRecords; i++) {
+                byte[] buf = new byte[RECORD_SIZE];
+                System.arraycopy(frame.data, i * RECORD_SIZE, buf, 0, RECORD_SIZE);
+                int effective = trimRightZeros(buf);
+                page.add(new String(buf, 0, effective, StandardCharsets.UTF_8));
+            }
+        } finally {
+            bufferManager.UNFIX(pageIndex);
         }
         return page;
     }
@@ -140,10 +193,21 @@ public class MiniSGBD implements AutoCloseable {
         }
 
         raf.seek(pageStart);
-        int bytesRead = raf.read(pageData);
+    raf.read(pageData);
 
         // Si la page n'est pas entièrement lue (fin de fichier), le reste reste à zéro
         return pageData;
+    }
+
+    /**
+     * Écrit les données brutes d'une page sur disque à la position correspondante.
+     */
+    public synchronized void writePageBytes(int pageIndex, byte[] data) throws IOException {
+        if (pageIndex < 0) throw new IndexOutOfBoundsException("pageIndex négatif");
+        if (data == null || data.length != PAGE_SIZE) throw new IllegalArgumentException("Taille de page incorrecte");
+        long pageStart = (long) pageIndex * PAGE_SIZE;
+        raf.seek(pageStart);
+        raf.write(data);
     }
 
     private static int trimRightZeros(byte[] buf) {
