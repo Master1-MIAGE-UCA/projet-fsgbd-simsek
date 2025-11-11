@@ -1,0 +1,27 @@
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+release.properties
+
+# IDEs
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Ignore specific test file (on request)
+src/test
+.github
+src/main/java/fr/uca/sgbd/BufferManager.java
+src/main/java/fr/uca/sgbd/BufferFrame.java
+.github
