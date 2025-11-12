@@ -9,6 +9,9 @@ import java.util.Map;
  */
 public class BufferManager {
     private final Map<Integer, BufferFrame> bufferPool = new HashMap<>();
+    public Map<Integer, BufferFrame> getBufferPool() {
+        return bufferPool;
+    }
     private final MiniSGBD miniSGBD;
 
     public BufferManager(MiniSGBD miniSGBD) {

@@ -8,10 +8,12 @@ public class BufferFrame {
     public byte[] data;
     public boolean dirty;
     public int usageCount;
+    public boolean transactional;
 
     public BufferFrame(byte[] data) {
         this.data = data;
         this.dirty = false;
         this.usageCount = 0;
+        this.transactional = false;
     }
 }

@@ -21,6 +21,57 @@ import java.util.List;
  * - getPage(pageIndex) lit la page (0-based) entière
  */
 public class MiniSGBD implements AutoCloseable {
+    private boolean inTransaction = false;
+    // Longueur logique utilisée durant une transaction pour positionner les insertions sans écrire sur disque
+    private long txnLogicalLength = -1L;
+    /**
+     * Lance une transaction. Si une transaction est déjà en cours, elle est commitée.
+     */
+    public synchronized void begin() throws IOException {
+        if (inTransaction) {
+            commit();
+        }
+        inTransaction = true;
+        txnLogicalLength = raf.length();
+    }
+
+    /**
+     * Commit la transaction : écrit les pages transactionnelles modifiées sur disque.
+     */
+    public synchronized void commit() throws IOException {
+        for (var entry : bufferManager.getBufferPool().entrySet()) {
+            BufferFrame frame = entry.getValue();
+            if (frame.dirty && frame.transactional) {
+                writePageBytes(entry.getKey(), frame.data);
+                frame.dirty = false;
+            }
+            frame.transactional = false;
+        }
+        // Finalise la longueur du fichier selon la longueur logique de la transaction
+        if (txnLogicalLength >= 0 && txnLogicalLength > raf.length()) {
+            raf.setLength(txnLogicalLength);
+        }
+        inTransaction = false;
+        txnLogicalLength = -1L;
+    }
+
+    /**
+     * Rollback la transaction : ignore les modifications des pages transactionnelles.
+     */
+    public synchronized void rollback() {
+        var toRemove = new ArrayList<Integer>();
+        for (var entry : bufferManager.getBufferPool().entrySet()) {
+            BufferFrame frame = entry.getValue();
+            if (frame.transactional) {
+                toRemove.add(entry.getKey());
+            }
+        }
+        for (int pageId : toRemove) {
+            bufferManager.getBufferPool().remove(pageId);
+        }
+        inTransaction = false;
+        txnLogicalLength = -1L;
+    }
     public static final int PAGE_SIZE = 4096;
     public static final int RECORD_SIZE = 100;
     public static final int RECORDS_PER_PAGE = PAGE_SIZE / RECORD_SIZE; // 40
@@ -45,21 +96,33 @@ public class MiniSGBD implements AutoCloseable {
     public synchronized void insertRecord(String value) throws IOException {
         byte[] dataUtf8 = value.getBytes(StandardCharsets.UTF_8);
         byte[] fixed = new byte[RECORD_SIZE];
-
         int len = Math.min(dataUtf8.length, RECORD_SIZE);
         System.arraycopy(dataUtf8, 0, fixed, 0, len);
         // padding implicite avec 0 pour le reste
 
-        long length = raf.length();
+        long length = inTransaction ? txnLogicalLength : raf.length();
         long offsetInPage = length % PAGE_SIZE;
         if (offsetInPage + RECORD_SIZE > PAGE_SIZE) {
-            // saut à la prochaine page
-            long skip = PAGE_SIZE - offsetInPage;
-            raf.seek(length + skip);
-        } else {
-            raf.seek(length);
+            length += (PAGE_SIZE - offsetInPage); // logique d'append page suivante
+            offsetInPage = 0;
         }
-        raf.write(fixed);
+        int pageIndex = (int) (length / PAGE_SIZE);
+        int slot = (int) (offsetInPage / RECORD_SIZE);
+
+        BufferFrame frame = bufferManager.FIX(pageIndex);
+        try {
+            System.arraycopy(fixed, 0, frame.data, slot * RECORD_SIZE, RECORD_SIZE);
+            bufferManager.USE(pageIndex);
+            if (inTransaction) {
+                frame.transactional = true;
+                // avance la longueur logique de la transaction
+                long newEnd = (long) pageIndex * PAGE_SIZE + (slot + 1) * RECORD_SIZE;
+                if (newEnd > txnLogicalLength) txnLogicalLength = newEnd;
+            }
+            // Pas d'écriture disque ici (insertion classique = buffer seulement)
+        } finally {
+            bufferManager.UNFIX(pageIndex);
+        }
     }
 
     /**
@@ -70,42 +133,43 @@ public class MiniSGBD implements AutoCloseable {
         byte[] fixed = new byte[RECORD_SIZE];
         int len = Math.min(dataUtf8.length, RECORD_SIZE);
         System.arraycopy(dataUtf8, 0, fixed, 0, len);
-        // padding implicite avec 0 pour le reste
 
         int pageIndex = 0;
         boolean inserted = false;
         while (!inserted) {
             BufferFrame frame = bufferManager.FIX(pageIndex);
+            int slot = -1;
             try {
-                // Cherche la première case vide dans la page
-                int slot = -1;
                 for (int i = 0; i < RECORDS_PER_PAGE; i++) {
                     boolean empty = true;
                     for (int j = 0; j < RECORD_SIZE; j++) {
-                        if (frame.data[i * RECORD_SIZE + j] != 0) {
-                            empty = false;
-                            break;
-                        }
+                        if (frame.data[i * RECORD_SIZE + j] != 0) { empty = false; break; }
                     }
-                    if (empty) {
-                        slot = i;
-                        break;
-                    }
+                    if (empty) { slot = i; break; }
                 }
                 if (slot != -1) {
-                    // Insère dans la première case vide
                     System.arraycopy(fixed, 0, frame.data, slot * RECORD_SIZE, RECORD_SIZE);
                     bufferManager.USE(pageIndex);
-                    bufferManager.FORCE(pageIndex);
-                    // Met à jour la taille du fichier si besoin
-                    long newEnd = (long) pageIndex * PAGE_SIZE + (slot + 1) * RECORD_SIZE;
-                    if (newEnd > raf.length()) {
+                    if (inTransaction) {
+                        frame.transactional = true;
+                        long newEnd = (long) pageIndex * PAGE_SIZE + (slot + 1) * RECORD_SIZE;
+                        if (newEnd > txnLogicalLength) txnLogicalLength = newEnd;
+                    } else {
+                        // Écrit directement l'enregistrement au bon offset et force la page
+                        long filePos = (long) pageIndex * PAGE_SIZE + (long) slot * RECORD_SIZE;
+                        raf.seek(filePos);
+                        raf.write(fixed);
+                        bufferManager.FORCE(pageIndex);
+                        long newEnd = (long) pageIndex * PAGE_SIZE + (slot + 1) * RECORD_SIZE;
+                        // Ajuste la longueur du fichier exactement à la fin du dernier enregistrement
                         raf.setLength(newEnd);
                     }
                     inserted = true;
                 } else {
                     // Page pleine, passe à la suivante
+                    bufferManager.UNFIX(pageIndex);
                     pageIndex++;
+                    continue;
                 }
             } finally {
                 bufferManager.UNFIX(pageIndex);
@@ -127,6 +191,17 @@ public class MiniSGBD implements AutoCloseable {
             byte[] buf = new byte[RECORD_SIZE];
             System.arraycopy(frame.data, (int) (indexInPage * RECORD_SIZE), buf, 0, RECORD_SIZE);
             int effective = trimRightZeros(buf);
+            if (effective == 0) {
+                // Fallback: lit directement depuis le disque si disponible
+                long filePos = pageIndex * PAGE_SIZE + indexInPage * RECORD_SIZE;
+                if (filePos + RECORD_SIZE <= raf.length()) {
+                    byte[] direct = new byte[RECORD_SIZE];
+                    raf.seek(filePos);
+                    raf.readFully(direct);
+                    int eff2 = trimRightZeros(direct);
+                    return new String(direct, 0, eff2, StandardCharsets.UTF_8);
+                }
+            }
             return new String(buf, 0, effective, StandardCharsets.UTF_8);
         } finally {
             bufferManager.UNFIX((int) pageIndex);

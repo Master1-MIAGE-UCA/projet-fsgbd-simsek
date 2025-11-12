@@ -1,82 +1,65 @@
 
-# Mini-SGBD – Étape 1 & 2 : Stockage des données + Gestion du buffer
+# Mini-SGBD – Étapes 1, 2 & 3
 
-Ce projet montre comment un SGBD simple stocke ses données sur disque et gère les pages en mémoire.
-
-Les données sont organisées en pages de taille fixe (4096 octets) et chaque enregistrement occupe 100 octets.
+Ce projet implémente un mini-SGBD éducatif qui couvre trois étapes fondamentales :
+1.  **Stockage des données** : Organisation des données en pages de taille fixe sur disque.
+2.  **Gestion du buffer** : Utilisation d'un buffer en mémoire pour optimiser les accès disque avec les primitives `FIX`, `UNFIX`, `USE`, `FORCE`.
+3.  **Transactions simplifiées** : Ajout d'un mécanisme de transaction avec `BEGIN`, `COMMIT`, `ROLLBACK`.
 
 ## Fonctionnement
 
 ### Étape 1 : Stockage par pages
-- Une page = 4096 octets, un enregistrement = 100 octets, donc 40 enregistrements par page.
-- Les enregistrements sont écrits à la fin du fichier, alignés sur les pages.
-- Lecture par identifiant : `readRecord(id)` (exemple : `readRecord(41)` retourne "Etudiant 42").
-- Lecture d'une page : `getPage(pageIndex)` (exemple : `getPage(0)` retourne les 40 premiers étudiants).
+- **Page** : 4096 octets.
+- **Enregistrement** : 100 octets.
+- **Organisation** : 40 enregistrements par page. Les enregistrements sont ajoutés à la fin du fichier, en respectant les limites de page.
 
-### Étape 2 : Gestion du buffer et primitives
-Un SGBD charge les pages en mémoire avant de les manipuler (plus rapide que lire/écrire directement sur disque).
+### Étape 2 : Gestion du buffer
+- **`insertRecord(String data)`** : Insertion classique qui écrit uniquement dans le buffer en mémoire. Les modifications ne sont pas persistantes sans une action supplémentaire (commit ou force).
+- **`insertRecordSync(String data)`** : Insertion synchrone qui écrit dans le buffer et force immédiatement l'écriture sur disque, garantissant la persistance.
+- **`readRecord(id)` / `getPage(pageIndex)`** : Utilisent le buffer pour lire les données, optimisant les accès disque.
 
-**Primitives implémentées :**
-- **FIX(pageId)** : charge une page en mémoire (ou la récupère si elle y est déjà), incrémente le compteur d'utilisation.
-- **UNFIX(pageId)** : indique que la page n'est plus utilisée, décrémente le compteur.
-- **USE(pageId)** : marque la page comme modifiée (dirty).
-- **FORCE(pageId)** : écrit la page sur disque si elle est modifiée.
-
-**Nouvelles fonctionnalités :**
-- `insertRecordSync(String data)` : insère un enregistrement de façon synchrone (écrit dans le buffer ET force l'écriture sur disque).
-- `readRecord()` et `getPage()` utilisent maintenant le buffer via FIX/UNFIX.
+### Étape 3 : Transactions simplifiées
+- **`begin()`** : Démarre une transaction. Les modifications suivantes sont marquées comme transactionnelles.
+- **`commit()`** : Valide la transaction en cours. Toutes les pages modifiées et marquées comme transactionnelles sont écrites sur disque.
+- **`rollback()`** : Annule la transaction. Les modifications transactionnelles dans le buffer sont ignorées et supprimées.
 
 ## Exemple d'utilisation
 
 ```java
+// Exemple de transaction avec commit et rollback
 MiniSGBD db = new MiniSGBD("etudiants.db");
 
-// Insertion synchrone (écrit dans buffer + disque)
-for (int i = 1; i <= 105; i++) {
-    db.insertRecordSync("Etudiant " + i);
-}
+// 1. Rollback : les modifications sont perdues
+db.begin();
+db.insertRecord("Etudiant 200");
+db.insertRecord("Etudiant 201");
+db.rollback(); 
+// => "Etudiant 200" et "Etudiant 201" ne sont PAS sur le disque.
 
-// Lecture avec buffer
-System.out.println("Enregistrement 42 : " + db.readRecord(41));
-System.out.println("Page 1 : " + db.getPage(0));
-System.out.println("Page 2 : " + db.getPage(1));
-System.out.println("Page 3 : " + db.getPage(2));
-```
-
-Sortie attendue :
-
-```
-Enregistrement 42 : Etudiant 42
-Page 1 : [Etudiant 1, ..., Etudiant 40]
-Page 2 : [Etudiant 41, ..., Etudiant 80]
-Page 3 : [Etudiant 81, ..., Etudiant 105]
+// 2. Commit : les modifications sont persistantes
+db.begin();
+db.insertRecord("Etudiant 202");
+db.insertRecord("Etudiant 203");
+db.commit();
+// => "Etudiant 202" et "Etudiant 203" sont sur le disque.
 ```
 
 ## Compilation et exécution
 
-Compiler :
-```bash
-javac src/main/java/fr/uca/sgbd/*.java
-```
+Le projet utilise Maven.
 
-Exécuter :
-```bash
-java -cp src/main/java fr.uca.sgbd.App
-```
+1.  **Compiler et tester :**
+    ```bash
+    mvn clean package
+    ```
+
+2.  **Exécuter l'exemple principal (`App.java`) :**
+    ```bash
+    java -cp target/classes fr.uca.sgbd.App
+    ```
 
 ## Paramètres principaux
 
-- PAGE_SIZE = 4096
-- RECORD_SIZE = 100
-- RECORDS_PER_PAGE = 40
-
-## Remarques
-
-- Insertion classique `insertRecord()` : écrit directement sur disque (sans buffer).
-- Insertion synchrone `insertRecordSync()` : utilise le buffer avec FIX/USE/FORCE.
-- Lecture/écriture passent par le buffer via les primitives FIX/UNFIX.
-- Le buffer est chargé en mémoire et ne s'évacue pas automatiquement (acceptable pour ce TD).
-- Pas de suppression/mise à jour, uniquement insertion en fin.
-- Pas de métadonnées ni de catalogue.
-
-Projet éducatif. Aucune licence spécifique.
+- `PAGE_SIZE` = 4096
+- `RECORD_SIZE` = 100
+- `RECORDS_PER_PAGE` = 40

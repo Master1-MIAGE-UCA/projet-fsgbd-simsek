@@ -5,6 +5,9 @@ pom.xml.releaseBackup
 pom.xml.versionsBackup
 release.properties
 
+# Compiled Java classes
+*.class
+
 # IDEs
 .idea/
 *.iml
@@ -19,5 +22,6 @@ release.properties
 # Logs
 *.log
 
-# Ignorer le dossier de tests
 src/test/
+# Database files
+*.db
