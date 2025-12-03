@@ -7,7 +7,11 @@ import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Mini-SGBD – Étape 1 : stockage par pages fixes.
@@ -21,6 +25,17 @@ import java.util.List;
  * - getPage(pageIndex) lit la page (0-based) entière
  */
 public class MiniSGBD implements AutoCloseable {
+    public static final int PAGE_SIZE = 4096;
+    public static final int RECORD_SIZE = 100;
+    public static final int RECORDS_PER_PAGE = PAGE_SIZE / RECORD_SIZE; // 40
+
+    private final RandomAccessFile raf;
+    private final BufferManager bufferManager;
+
+    // TP4: TIV (Tampon d'Images Avant) et Verrous
+    private final Map<Integer, byte[]> tiv = new HashMap<>();
+    private final Set<String> locks = new HashSet<>();
+
     private boolean inTransaction = false;
     // Longueur logique utilisée durant une transaction pour positionner les insertions sans écrire sur disque
     private long txnLogicalLength = -1L;
@@ -47,10 +62,17 @@ public class MiniSGBD implements AutoCloseable {
             }
             frame.transactional = false;
         }
-        // Finalise la longueur du fichier selon la longueur logique de la transaction
-        if (txnLogicalLength >= 0 && txnLogicalLength > raf.length()) {
+                // Finalise la longueur du fichier selon la longueur logique de la transaction
+        // TP4 Correction: writePageBytes agrandit le fichier à la taille de la page (4096).
+        // Mais la taille réelle des données est txnLogicalLength. Nous devons couper le fichier (trim).
+        if (txnLogicalLength >= 0) {
             raf.setLength(txnLogicalLength);
         }
+        
+        // TP4: Temizlik
+        tiv.clear();
+        locks.clear();
+        
         inTransaction = false;
         txnLogicalLength = -1L;
     }
@@ -59,25 +81,33 @@ public class MiniSGBD implements AutoCloseable {
      * Rollback la transaction : ignore les modifications des pages transactionnelles.
      */
     public synchronized void rollback() {
-        var toRemove = new ArrayList<Integer>();
-        for (var entry : bufferManager.getBufferPool().entrySet()) {
-            BufferFrame frame = entry.getValue();
-            if (frame.transactional) {
-                toRemove.add(entry.getKey());
+        // TP4: Restauration depuis le TIV
+        for (Map.Entry<Integer, byte[]> entry : tiv.entrySet()) {
+            int pageId = entry.getKey();
+            byte[] originalData = entry.getValue();
+            try {
+                BufferFrame frame = bufferManager.FIX(pageId);
+                System.arraycopy(originalData, 0, frame.data, 0, PAGE_SIZE);
+                // La donnée restaurée est considérée comme "propre" (identique au disque)
+                // ou son état précédent. Pour simplifier, on met dirty=false.
+                frame.dirty = false; 
+                frame.transactional = false;
+                bufferManager.UNFIX(pageId);
+            } catch (IOException e) {
+                e.printStackTrace();
             }
         }
-        for (int pageId : toRemove) {
-            bufferManager.getBufferPool().remove(pageId);
-        }
+        
+        // Nous utilisons le TIV au lieu de l'ancienne méthode (suppression des pages).
+        // Cependant, peut-il y avoir des pages nouvellement créées pendant la transaction et absentes du TIV ?
+        // Dans la logique insertRecord, nous enregistrons dans le TIV à chaque modification.
+        // Même s'il s'agit d'une nouvelle page (vide), elle doit être ajoutée au TIV.
+        
+        tiv.clear();
+        locks.clear();
         inTransaction = false;
         txnLogicalLength = -1L;
     }
-    public static final int PAGE_SIZE = 4096;
-    public static final int RECORD_SIZE = 100;
-    public static final int RECORDS_PER_PAGE = PAGE_SIZE / RECORD_SIZE; // 40
-
-    private final RandomAccessFile raf;
-    private final BufferManager bufferManager;
 
     public MiniSGBD(String path) throws FileNotFoundException {
         this(new File(path));
@@ -111,6 +141,20 @@ public class MiniSGBD implements AutoCloseable {
 
         BufferFrame frame = bufferManager.FIX(pageIndex);
         try {
+            // TP4: Verrouillage et copie dans le TIV
+            if (inTransaction) {
+                String lockKey = pageIndex + ":" + slot;
+                if (!locks.contains(lockKey)) {
+                    locks.add(lockKey);
+                    // Sauvegarder l'état original de la page dans le TIV (si absent)
+                    if (!tiv.containsKey(pageIndex)) {
+                        byte[] original = new byte[PAGE_SIZE];
+                        System.arraycopy(frame.data, 0, original, 0, PAGE_SIZE);
+                        tiv.put(pageIndex, original);
+                    }
+                }
+            }
+
             System.arraycopy(fixed, 0, frame.data, slot * RECORD_SIZE, RECORD_SIZE);
             bufferManager.USE(pageIndex);
             if (inTransaction) {
@@ -148,6 +192,19 @@ public class MiniSGBD implements AutoCloseable {
                     if (empty) { slot = i; break; }
                 }
                 if (slot != -1) {
+                    // TP4: Verrouillage et TIV (valable aussi pour Sync)
+                    if (inTransaction) {
+                        String lockKey = pageIndex + ":" + slot;
+                        if (!locks.contains(lockKey)) {
+                            locks.add(lockKey);
+                            if (!tiv.containsKey(pageIndex)) {
+                                byte[] original = new byte[PAGE_SIZE];
+                                System.arraycopy(frame.data, 0, original, 0, PAGE_SIZE);
+                                tiv.put(pageIndex, original);
+                            }
+                        }
+                    }
+
                     System.arraycopy(fixed, 0, frame.data, slot * RECORD_SIZE, RECORD_SIZE);
                     bufferManager.USE(pageIndex);
                     if (inTransaction) {
@@ -188,8 +245,18 @@ public class MiniSGBD implements AutoCloseable {
         long indexInPage = recordId % RECORDS_PER_PAGE;
         BufferFrame frame = bufferManager.FIX((int) pageIndex);
         try {
+            byte[] sourceData = frame.data;
+
+            // TP4: Si en transaction et enregistrement verrouillé, lire depuis le TIV
+            if (inTransaction) {
+                String lockKey = (int)pageIndex + ":" + (int)indexInPage;
+                if (locks.contains(lockKey) && tiv.containsKey((int)pageIndex)) {
+                    sourceData = tiv.get((int)pageIndex);
+                }
+            }
+
             byte[] buf = new byte[RECORD_SIZE];
-            System.arraycopy(frame.data, (int) (indexInPage * RECORD_SIZE), buf, 0, RECORD_SIZE);
+            System.arraycopy(sourceData, (int) (indexInPage * RECORD_SIZE), buf, 0, RECORD_SIZE);
             int effective = trimRightZeros(buf);
             if (effective == 0) {
                 // Fallback: lit directement depuis le disque si disponible
