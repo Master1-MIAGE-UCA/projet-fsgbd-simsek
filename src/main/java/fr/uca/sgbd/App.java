@@ -8,7 +8,7 @@ public class App {
     public static void main(String[] args) throws IOException {
         String dbPath = "etudiants.db";
         java.nio.file.Files.deleteIfExists(java.nio.file.Path.of(dbPath));
-        MiniSGBD db = new MiniSGBD(dbPath);
+        SGBDManager db = new SGBDManager(dbPath);
 
         // Exemple 1 : rollback
         db.begin();

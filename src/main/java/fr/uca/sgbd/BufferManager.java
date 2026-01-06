@@ -8,29 +8,29 @@ import java.util.Map;
  * Gère le buffer de pages en mémoire et les primitives FIX, UNFIX, USE, FORCE.
  */
 public class BufferManager {
-    private final Map<Integer, BufferFrame> bufferPool = new HashMap<>();
-    public Map<Integer, BufferFrame> getBufferPool() {
+    private final Map<Integer, BufferPage> bufferPool = new HashMap<>();
+    public Map<Integer, BufferPage> getBufferPool() {
         return bufferPool;
     }
-    private final MiniSGBD miniSGBD;
+    private final SGBDManager sgbdManager;
 
-    public BufferManager(MiniSGBD miniSGBD) {
-        this.miniSGBD = miniSGBD;
+    public BufferManager(SGBDManager sgbdManager) {
+        this.sgbdManager = sgbdManager;
     }
 
     /**
      * FIX(pageId) : charge une page en mémoire si besoin, incrémente le compteur d’utilisation.
-     * Retourne le BufferFrame correspondant.
+     * Retourne le BufferPage correspondant.
      */
-    public BufferFrame FIX(int pageId) throws IOException {
-        BufferFrame frame = bufferPool.get(pageId);
-        if (frame == null) {
-            byte[] pageData = miniSGBD.readPageBytes(pageId);
-            frame = new BufferFrame(pageData);
-            bufferPool.put(pageId, frame);
+    public BufferPage FIX(int pageId) throws IOException {
+        BufferPage page = bufferPool.get(pageId);
+        if (page == null) {
+            byte[] pageData = sgbdManager.readPageBytes(pageId);
+            page = new BufferPage(pageData);
+            bufferPool.put(pageId, page);
         }
-        frame.usageCount++;
-        return frame;
+        page.usageCount++;
+        return page;
     }
 
     /**
@@ -38,9 +38,9 @@ public class BufferManager {
      * Si le compteur atteint zéro, la page peut être évacuée du buffer (non fait ici).
      */
     public void UNFIX(int pageId) {
-        BufferFrame frame = bufferPool.get(pageId);
-        if (frame != null && frame.usageCount > 0) {
-            frame.usageCount--;
+        BufferPage page = bufferPool.get(pageId);
+        if (page != null && page.usageCount > 0) {
+            page.usageCount--;
             // Optionnel : évacuer si usageCount == 0
         }
     }
@@ -49,9 +49,9 @@ public class BufferManager {
      * USE(pageId) : marque la page comme modifiée (dirty).
      */
     public void USE(int pageId) {
-        BufferFrame frame = bufferPool.get(pageId);
-        if (frame != null) {
-            frame.dirty = true;
+        BufferPage page = bufferPool.get(pageId);
+        if (page != null) {
+            page.dirty = true;
         }
     }
 
@@ -59,10 +59,10 @@ public class BufferManager {
      * FORCE(pageId) : écrit la page sur disque si elle est modifiée (dirty).
      */
     public void FORCE(int pageId) throws IOException {
-        BufferFrame frame = bufferPool.get(pageId);
-        if (frame != null && frame.dirty) {
-            miniSGBD.writePageBytes(pageId, frame.data);
-            frame.dirty = false;
+        BufferPage page = bufferPool.get(pageId);
+        if (page != null && page.dirty) {
+            sgbdManager.writePageBytes(pageId, page.data);
+            page.dirty = false;
         }
     }
 }
