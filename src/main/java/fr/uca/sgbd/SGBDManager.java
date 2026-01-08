@@ -76,6 +76,13 @@ public class SGBDManager implements AutoCloseable {
         
         // Forcer l'écriture du TJT dans le FJT
         flushJournalToDisk();
+
+        // FIX: Mettre à jour la taille physique du fichier pour refléter les ajouts,
+        // même si les pages de données ne sont pas encore écrites (No-Force).
+        // Cela évite l'écrasement lors de la prochaine allocation.
+        if (txnLogicalLength > raf.length()) {
+            raf.setLength(txnLogicalLength);
+        }
         
         // Nettoyer les pages transactionnelles (sans écrire sur disque)
         for (var entry : bufferManager.getBufferPool().entrySet()) {
@@ -266,6 +273,57 @@ public class SGBDManager implements AutoCloseable {
             } finally {
                 bufferManager.UNFIX(pageIndex);
             }
+        }
+    }
+
+    /**
+     * Met à jour un enregistrement existant.
+     * Cette méthode est nécessaire pour le TP4 (Verrous) et TP5 (Logs UPDATE).
+     */
+    public synchronized void updateRecord(int recordId, String newValue) throws IOException {
+        if (recordId < 0) throw new IndexOutOfBoundsException("recordId négatif");
+        int pageIndex = recordId / RECORDS_PER_PAGE;
+        int slot = recordId % RECORDS_PER_PAGE;
+        
+        // Vérifier si la page est dans les limites connues du fichier
+        // Note: en transaction, on peut avoir des pages au-delà de raf.length() si on a fait des inserts
+        // Mais updateRecord modifie de l'existant.
+        
+        BufferPage page = bufferManager.FIX(pageIndex);
+        try {
+            byte[] dataUtf8 = newValue.getBytes(StandardCharsets.UTF_8);
+            byte[] fixed = new byte[RECORD_SIZE];
+            int len = Math.min(dataUtf8.length, RECORD_SIZE);
+            System.arraycopy(dataUtf8, 0, fixed, 0, len);
+
+            if (inTransaction) {
+                String lockKey = pageIndex + ":" + slot;
+                // Gestion des verrous (TP4)
+                if (!locks.contains(lockKey)) {
+                    locks.add(lockKey);
+                    // Sauvegarde TIV (TP4)
+                    if (!tiv.containsKey(pageIndex)) {
+                        byte[] original = new byte[PAGE_SIZE];
+                        System.arraycopy(page.data, 0, original, 0, PAGE_SIZE);
+                        tiv.put(pageIndex, original);
+                    }
+                }
+                
+                // Logging (TP5)
+                byte[] beforeImage = new byte[RECORD_SIZE];
+                System.arraycopy(page.data, slot * RECORD_SIZE, beforeImage, 0, RECORD_SIZE);
+                addLogEntry(new LogEntry(currentTransactionId, LogType.UPDATE, 
+                    pageIndex, slot, beforeImage, fixed));
+            }
+
+            // Application de la modification (TIA)
+            System.arraycopy(fixed, 0, page.data, slot * RECORD_SIZE, RECORD_SIZE);
+            bufferManager.USE(pageIndex);
+            if (inTransaction) {
+                page.transactional = true;
+            }
+        } finally {
+            bufferManager.UNFIX(pageIndex);
         }
     }
 
@@ -542,12 +600,22 @@ public class SGBDManager implements AutoCloseable {
                         int pageId = parts.length > 2 ? Integer.parseInt(parts[2]) : -1;
                         int slot = parts.length > 3 ? Integer.parseInt(parts[3]) : -1;
                         
-                        journal.add(new LogEntry(txnId, type, pageId, slot, null, null));
+                        byte[] before = null;
+                        byte[] after = null;
+                        if (parts.length > 4 && !"NULL".equals(parts[4])) {
+                            before = java.util.HexFormat.of().parseHex(parts[4]);
+                        }
+                        if (parts.length > 5 && !"NULL".equals(parts[5])) {
+                            after = java.util.HexFormat.of().parseHex(parts[5]);
+                        }
+                        
+                        journal.add(new LogEntry(txnId, type, pageId, slot, before, after));
                     }
                 }
             }
         } catch (Exception e) {
             // Fin du fichier ou erreur de parsing
+            e.printStackTrace();
         }
         
         return journal;
@@ -580,10 +648,17 @@ public class SGBDManager implements AutoCloseable {
      */
     private synchronized void flushJournalToDisk() throws IOException {
         for (LogEntry entry : tjt) {
-            String logLine = String.format("%d|%s|%d|%d%n", 
-                entry.transactionId, entry.type, entry.pageId, entry.slot);
+            String beforeHex = (entry.beforeImage == null) ? "NULL" : java.util.HexFormat.of().formatHex(entry.beforeImage);
+            String afterHex = (entry.afterImage == null) ? "NULL" : java.util.HexFormat.of().formatHex(entry.afterImage);
+            
+            String logLine = String.format("%d|%s|%d|%d|%s|%s%n", 
+                entry.transactionId, entry.type, entry.pageId, entry.slot, beforeHex, afterHex);
             fjt.writeBytes(logLine);
         }
         tjt.clear();
+    }
+    
+    public java.io.RandomAccessFile getRaf() {
+        return raf;
     }
 }

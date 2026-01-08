@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Scanner;
 
 /**
  * Scénario de démonstration pour la soutenance Étape 5
@@ -20,6 +21,7 @@ public class DemoSoutenance {
     private SGBDManager db;
     private File dbFile;
     private File journalFile;
+    private Scanner scanner = new Scanner(System.in);
 
     public DemoSoutenance(String dbPath) throws IOException {
         this.dbFile = new File(dbPath);
@@ -36,6 +38,11 @@ public class DemoSoutenance {
         // Ouvrir la DB
         this.db = new SGBDManager(dbFile);
         System.out.println("✓ Base de données initialisée vierge");
+    }
+
+    private void waitForUser() {
+        System.out.println(">>> Appuyez sur ENTER pour continuer...");
+        scanner.nextLine();
     }
 
     /**
@@ -88,14 +95,16 @@ public class DemoSoutenance {
         db.begin();
         System.out.println("✓ Transaction démarrée");
         
-        System.out.println("\n[Action] Modifier Record_A en 'Record_A_MODIFIE'...");
-        // Simuler une modification : relire et modifier
-        String current = db.readRecord(0);
-        System.out.println("  Valeur lue en transaction : '" + current + "'");
-        // La modification se fait via insertRecord au même endroit
-        // (Nous devons créer une méthode UPDATE pour vrai, mais pour la démo...)
-        System.out.println("  (Modification en cours dans le buffer)");
+        System.out.println("\n[Action] Modifier Record_A en 'Record_A_MODIFIE' (via updateRecord)...");
+        // Modification explicite via la nouvelle méthode updateRecord
+        db.updateRecord(0, "Record_A_MODIFIE");
+        System.out.println("  ✓ Update effecuté en mémoire (TIA)");
         
+        System.out.println("\n[Observation] Lecture de Record_A pendant la transaction:");
+        String valPendant = db.readRecord(0);
+        System.out.println("  Lecture = '" + valPendant + "'");
+        System.out.println("  (Note : Selon la spec TIV/Lock, la lecture retourne l'image avant si verrouillé)");
+
         System.out.println("\n[Action] ROLLBACK...");
         db.rollback();
         System.out.println("✓ Transaction annulée (ROLLBACK)");
@@ -116,29 +125,29 @@ public class DemoSoutenance {
         System.out.println("ÉTAPE 3 : LA PERSISTANCE (Commit & Journal)");
         System.out.println("=".repeat(60));
         
+        System.out.println("\n[Objectif] Valider qu'une transaction validée laisse une trace durable");
+        
         System.out.println("\n[Action] Démarrer une transaction (BEGIN)...");
         db.begin();
         System.out.println("✓ Transaction démarrée");
         
-        System.out.println("\n[Action] Insérer 'Record_B_FINAL' (ID 2)...");
-        db.insertRecord("Record_B_FINAL");
-        System.out.println("✓ Record_B_FINAL inséré dans la transaction");
+        System.out.println("\n[Action] Modifier 'Record_B' (ID 1) en 'Record_B_FINAL'...");
+        db.updateRecord(1, "Record_B_FINAL");
+        System.out.println("✓ Modification (Update) effectuée en mémoire");
         
         System.out.println("\n[Action] Valider (COMMIT)...");
         db.commit();
         System.out.println("✓ Transaction commitée - Journal écrit sur disque");
         
-        System.out.println("\n[Action] Checkpoint pour persister sur disque...");
-        db.checkpoint();
-        System.out.println("✓ Checkpoint exécuté");
-        
-        System.out.println("\n[Vérification] État des fichiers:");
-        long dbSize = dbFile.length();
+        System.out.println("\n[Vérification] Vérifier la présence/taille du fichier de journal (Log)...");
         long journalSize = journalFile.exists() ? journalFile.length() : 0;
-        System.out.println("  Taille fichier DB : " + dbSize + " octets");
         System.out.println("  Taille fichier Journal : " + journalSize + " octets");
-        System.out.println("  ✓ Fichier de journal créé/modifié : " + (journalSize > 0 ? "OUI" : "NON"));
+        System.out.println("  ✓ Fichier de journal présent : " + (journalSize > 0 ? "OUI" : "NON"));
         
+        if (journalSize == 0) {
+            System.err.println("⚠️ ATTENTION: Le fichier journal est vide ou absent !");
+        }
+
         System.out.println("✓ ÉTAPE 3 RÉUSSIE");
     }
 
@@ -177,13 +186,14 @@ public class DemoSoutenance {
         db.crash();
         System.out.println("✓ Crash simulé - Buffers vidés sans sauvegarde");
         System.out.println("  (Simulation d'une perte de mémoire volatile)");
-        
         System.out.println("\n[Action] Redémarrer et lancer recover()...");
         // Fermer et réouvrir
         db.close();
         db = new SGBDManager(dbFile);
         System.out.println("✓ Base de données réouverte");
-        
+    }
+
+    public void etape5_CrashRecoveryBis() throws IOException {
         System.out.println("\n[Action] Lancer la récupération (recover())...");
         db.recover();
         System.out.println("✓ Récupération terminée");
@@ -214,11 +224,25 @@ public class DemoSoutenance {
      */
     public void runFullDemo() throws IOException {
         try {
+            System.out.println("Début de la démonstration FSGBD");
+            waitForUser();
+
             etape1_Remplissage();
+            waitForUser();
+
             etape2_Annulation();
+            waitForUser();
+
             etape3_Persistance();
+            waitForUser();
+
             etape4_PreparationCrash();
+            waitForUser();
+
             etape5_CrashRecovery();
+            waitForUser();
+
+            etape5_CrashRecoveryBis();
             
             System.out.println("\n" + "=".repeat(60));
             System.out.println("✓✓✓ DÉMONSTRATION COMPLÈTE RÉUSSIE ✓✓✓");
